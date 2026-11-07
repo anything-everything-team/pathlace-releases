@@ -1,0 +1,64 @@
+name: mirror installers
+# Pulls the installers for a version from the download mirror at pathlace.com/dl
+# and publishes them as a GitHub Release here, so downloads never need a GitHub login.
+# Runs by hand (choose a tag) and every hour (picks up whatever latest.json says).
+on:
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: Tag to mirror (blank = latest)
+        required: false
+        default: ''
+  schedule:
+    - cron: '17 * * * *'
+
+permissions:
+  contents: write
+
+jobs:
+  mirror:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Work out which version
+        id: pick
+        run: |
+          set -euo pipefail
+          TAG="${{ github.event.inputs.tag }}"
+          if [ -z "$TAG" ]; then TAG=$(curl -fsSL https://pathlace.com/dl/latest.json | jq -r .tag); fi
+          echo "tag=$TAG" >> "$GITHUB_OUTPUT"
+          echo "mirroring $TAG"
+      - name: Download from pathlace.com
+        env:
+          TAG: ${{ steps.pick.outputs.tag }}
+        run: |
+          set -euo pipefail
+          mkdir -p dist && cd dist
+          curl -fsSL "https://pathlace.com/dl/$TAG/SHA256SUMS.txt" -o SHA256SUMS.txt
+          awk '{print $2}' SHA256SUMS.txt | while read -r f; do
+            echo "  $f"; curl -fsSL "https://pathlace.com/dl/$TAG/$f" -o "$f"
+          done
+          sha256sum -c SHA256SUMS.txt
+      - name: Create or update the release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ steps.pick.outputs.tag }}
+        run: |
+          set -euo pipefail
+          cat > notes.md <<'MD'
+          Pathlace Studio installers. Pick the one for your computer:
+          - macOS: `.dmg` (aarch64 for Apple silicon, x64 for Intel)
+          - Windows: `.msi` or `-setup.exe`
+          - Linux: `.AppImage`, `.deb` or `.rpm`
+
+          `pathlace-player-*` files are the runtime Studio uses when you export a program as a runnable app; you do not need them by hand.
+
+          The browser edition is at https://pathlace.com/app/ and the docs at https://pathlace.com/docs.html.
+          MD
+          if ! gh release view "$TAG" >/dev/null 2>&1; then
+            gh release create "$TAG" --title "Pathlace Studio $TAG" --notes-file notes.md
+          fi
+          existing=$(gh release view "$TAG" --json assets --jq '.assets[].name')
+          for f in dist/*; do
+            n=$(basename "$f")
+            if echo "$existing" | grep -qx "$n"; then echo "have $n"; else gh release upload "$TAG" "$f"; fi
+          done
